@@ -670,13 +670,16 @@ describe('TelemetryHub & Capsule UI', () => {
     assert.ok(tip.textContent.includes('Prompt 快取命中率'));
     assert.ok(tip.textContent.includes('點擊切換: English'));
 
-    // Quota HUD tooltip shows Scheme 5 5h fallback in zh-TW
+    // Quota HUD tooltip shows Scheme 5 5h fallback + always-present Weekly row in zh-TW
     capsule.updateQuotaTooltipContent(quotaBtn);
     const quotaTip = doc.getElementById('__agy_quota_hud_tooltip__');
     assert.ok(quotaTip.textContent.includes('5小時額度'));
     assert.ok(quotaTip.textContent.includes('72%'));
     assert.ok(quotaTip.textContent.includes('後重置'));
-    assert.equal(quotaTip.querySelector('.agy-quota-hud-weekly'), null);
+    const weeklyRowFallback = quotaTip.querySelector('.agy-quota-hud-weekly');
+    assert.ok(weeklyRowFallback);
+    assert.ok(weeklyRowFallback.textContent.includes('每週額度'));
+    assert.ok(weeklyRowFallback.textContent.includes('--'));
 
     // Non-zero generation speed reveals speed cluster + dot + hairline separator; 0% usage equals full circumference
     capsule.renderFooterCapsule(footer, { ...resolved, tokPerSec: 42, avgTokPerSec: 38, usagePercent: 0, contextUsed: 0 });
@@ -1344,13 +1347,18 @@ describe('TelemetryHub & Capsule UI', () => {
     assert.equal(quotaBtn.querySelector('.agy-quota-wk-val').textContent, '61%');
     assert.equal(quotaBtn.querySelector('.agy-quota-wk-ring-fill').getAttribute('stroke'), '#4ea84e');
 
-    // Scheme 5 Quota HUD tooltip renders Model + 5h + Weekly across zh-CN / zh-TW / en and light/dark
+    // Scheme 5 Quota HUD tooltip renders Model header + 5h + Weekly (without context usage row) across zh-CN / zh-TW / en and light/dark
     quotaBtn.dispatchEvent({ type: 'mouseenter', target: quotaBtn });
     const quotaTip = doc.getElementById('__agy_quota_hud_tooltip__');
     assert.ok(quotaTip);
     assert.equal(quotaTip.style.opacity, '1');
     assert.ok(quotaTip.style.cssText.includes('ui-monospace'));
+    assert.equal(quotaTip.querySelector('.agy-quota-hud-model'), null, 'Quota HUD must NOT show context usage row');
+    assert.ok(quotaTip.querySelector('.agy-quota-hud-header'));
     assert.ok(quotaTip.textContent.includes('Orchestrator (Neon)'));
+    assert.ok(!quotaTip.textContent.includes('/1M'), 'Quota HUD must NOT include context used/limit ratio');
+    assert.ok(quotaTip.querySelector('.agy-quota-hud-5h'));
+    assert.ok(quotaTip.querySelector('.agy-quota-hud-weekly'));
     assert.ok(quotaTip.textContent.includes('5小时额度'));
     assert.ok(quotaTip.textContent.includes('84%'));
     assert.ok(quotaTip.textContent.includes('每周额度'));
@@ -1373,7 +1381,8 @@ describe('TelemetryHub & Capsule UI', () => {
     assert.equal(quotaBtn.querySelector('.agy-quota-wk-val').textContent, '44%');
     assert.equal(quotaBtn.querySelector('.agy-quota-wk-ring-fill').getAttribute('stroke'), '#4ea84e');
     assert.equal(quotaTip.querySelector('.agy-quota-hud-5h-bar').style.backgroundColor, '#f59e0b');
-    assert.equal(quotaTip.querySelector('.agy-quota-hud-weekly-bar').style.backgroundColor, '#64748b');
+    assert.equal(quotaTip.querySelector('.agy-quota-hud-weekly-bar').style.backgroundColor, '#10b981');
+    assert.equal(capsuleModule.getQuotaHudBarColor(0.8), '#10b981');
 
     // Force refresh with <=10% critical 5h threshold turns ring & HUD bar red (#ef4444)
     footer.__reactFiber$cap.memoizedProps = { conversationId: cid, modelId: 'MODEL_PLACEHOLDER_M537', label: 'Orchestrator (Neon)' };
@@ -1392,11 +1401,7 @@ describe('TelemetryHub & Capsule UI', () => {
     assert.equal(quotaTip.style.backgroundColor, 'rgba(255, 255, 255, 0.98)');
     doc.documentElement.classList.remove('light');
 
-    // Mouseleave hides Quota HUD tooltip
-    quotaBtn.dispatchEvent({ type: 'mouseleave', target: quotaBtn });
-    assert.equal(quotaTip.style.opacity, '0');
-
-    // Fault-tolerant Fiber failure returns null cleanly with zero throw and preserves GetUserStatus 5h fallback
+    // Fault-tolerant Fiber failure returns null cleanly with zero throw, preserves GetUserStatus 5h fallback, and still renders Weekly row with '--'
     summaryMode = 'throw';
     const failedSummary = await hub.refreshQuotaSummary(true);
     assert.equal(failedSummary, null);
@@ -1404,6 +1409,13 @@ describe('TelemetryHub & Capsule UI', () => {
     assert.equal(fallbackResolved.quotaInfo.remainingFraction, 0.84);
     assert.equal(fallbackResolved.quotaSummary.fiveHour.remainingFraction, 0.84);
     assert.equal(fallbackResolved.quotaSummary.weekly, null);
+    capsule.renderAllFooters();
+    assert.ok(quotaTip.querySelector('.agy-quota-hud-weekly'));
+    assert.ok(quotaTip.querySelector('.agy-quota-hud-weekly').textContent.includes('--'));
+
+    // Mouseleave hides Quota HUD tooltip
+    quotaBtn.dispatchEvent({ type: 'mouseleave', target: quotaBtn });
+    assert.equal(quotaTip.style.opacity, '0');
 
     capsule.dispose();
     hub.dispose();
@@ -1411,6 +1423,116 @@ describe('TelemetryHub & Capsule UI', () => {
     assert.equal(footer.querySelector('[data-agy-capsule-strip="1"]'), null);
     assert.equal(doc.getElementById('__agy_ctx_capsule_tooltip__'), null);
     assert.equal(doc.getElementById('__agy_quota_hud_tooltip__'), null);
+  });
+
+  it('extracts live Antigravity 2.x window/bucketId/displayName quota buckets via RetrieveUserQuotaSummary RPC fallback and Fiber dependencies.firstContext', async () => {
+    const { doc, win, storage } = createMockDomEnv();
+    const cid = 'cascade-quota-rpc-01';
+    const footer = doc.createElement('div');
+    footer.className = 'agy-composer-footer';
+    footer.__reactFiber$deps = {
+      memoizedProps: { conversationId: cid, modelId: 'MODEL_PLACEHOLDER_M537', label: 'Orchestrator (Neon)' },
+      dependencies: {
+        firstContext: {
+          memoizedValue: {
+            retrieveUserQuotaSummary: async () => ({
+              response: {
+                groups: [
+                  {
+                    displayName: 'Gemini Models',
+                    description: 'Models within this group: Gemini 4 Neon, Orchestrator (Neon), Gemini 3.8 Flash',
+                    buckets: [
+                      {
+                        bucketId: 'gemini-weekly',
+                        displayName: 'Weekly Limit Remaining',
+                        window: 'weekly',
+                        remaining: { case: 'remainingFraction', value: 0.8371535 },
+                        resetTime: { seconds: BigInt(Math.floor(Date.now() / 1000) + 5 * 24 * 3600), nanos: 0 }
+                      },
+                      {
+                        bucketId: 'gemini-5h',
+                        displayName: 'Five Hour Limit Remaining',
+                        window: '5h',
+                        remaining: { case: 'remainingFraction', value: 0.3960156 },
+                        resetTime: { seconds: BigInt(Math.floor(Date.now() / 1000) + 2 * 3600), nanos: 0 }
+                      }
+                    ]
+                  }
+                ]
+              }
+            })
+          },
+          next: null
+        }
+      },
+      return: null
+    };
+    doc.body.appendChild(footer);
+
+    let rpcQuotaCalls = 0;
+    win.fetch = async (url) => {
+      const target = String(url);
+      if (target.endsWith('/RetrieveUserQuotaSummary')) {
+        rpcQuotaCalls += 1;
+        return makeJsonResponse({
+          response: {
+            groups: [
+              {
+                displayName: 'Gemini Models',
+                description: 'Models within this group: Orchestrator (Neon), Gemini 4 Neon',
+                buckets: [
+                  {
+                    bucketId: 'gemini-weekly',
+                    displayName: 'Weekly Limit Remaining',
+                    window: 'weekly',
+                    remainingFraction: 0.75,
+                    resetTime: new Date(Date.now() + 4 * 24 * 3600 * 1000).toISOString()
+                  },
+                  {
+                    bucketId: 'gemini-5h',
+                    displayName: 'Five Hour Limit Remaining',
+                    window: '5h',
+                    remainingFraction: 0.42,
+                    resetTime: new Date(Date.now() + 3 * 3600 * 1000).toISOString()
+                  }
+                ]
+              }
+            ]
+          }
+        });
+      }
+      return makeJsonResponse({ ok: true });
+    };
+
+    const hub = telemetryModule.createTelemetryHub({
+      window: win,
+      document: doc,
+      location: win.location,
+      storage,
+      core,
+      autoPoll: false
+    });
+    hub.start();
+    await win.fetch('/local/seed', { headers: { 'x-codeium-csrf-token': 'csrf-rpc-1' } });
+
+    // 1. Fiber dependencies.firstContext path extracts real 5h & weekly buckets
+    const depSummary = await hub.refreshQuotaSummary(true);
+    assert.ok(depSummary);
+    const depResolved = hub.resolveUsageForFooter(footer);
+    assert.equal(depResolved.quotaSummary.fiveHour.remainingFraction, 0.3960156);
+    assert.equal(depResolved.quotaSummary.weekly.remainingFraction, 0.8371535);
+    assert.equal(rpcQuotaCalls, 0);
+
+    // 2. Without Fiber client, falls back cleanly to RetrieveUserQuotaSummary RPC
+    delete footer.__reactFiber$deps.dependencies;
+    const rpcSummary = await hub.refreshQuotaSummary(true);
+    assert.ok(rpcSummary);
+    assert.equal(rpcQuotaCalls, 1);
+    const rpcResolved = hub.resolveUsageForFooter(footer);
+    assert.equal(rpcResolved.quotaSummary.fiveHour.remainingFraction, 0.42);
+    assert.equal(rpcResolved.quotaSummary.weekly.remainingFraction, 0.75);
+
+    hub.dispose();
   });
 
   it('times out hanging retrieveUserQuotaSummary gracefully after 2s and clears timers on dispose', async () => {

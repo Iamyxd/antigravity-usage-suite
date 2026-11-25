@@ -43,6 +43,7 @@
       warnHigh: '接近自动压缩阈值，建议适时归档上下文',
       quota5h: '5小时额度',
       quotaWeekly: '每周额度',
+      quotaUnavailable: '--',
       steps: '步数',
       switchHint: '点击切换: English',
       resetsSoon: '即将重置',
@@ -66,6 +67,7 @@
       warnHigh: '接近自動壓縮閾值，建議適時歸檔上下文',
       quota5h: '5小時額度',
       quotaWeekly: '每週額度',
+      quotaUnavailable: '--',
       steps: '步數',
       switchHint: '點擊切換: English',
       resetsSoon: '即將重置',
@@ -89,6 +91,7 @@
       warnHigh: 'Approaching auto-compaction threshold',
       quota5h: '5-Hour',
       quotaWeekly: 'Weekly',
+      quotaUnavailable: '--',
       steps: 'Steps',
       switchHint: 'Click to switch: 中文',
       resetsSoon: 'Resets soon',
@@ -141,7 +144,7 @@
     const pct = Math.max(0, Math.min(100, Math.round((Number(remainingFraction) || 0) * 100)));
     if (pct <= 10) return '#ef4444';
     if (pct <= 25) return '#f59e0b';
-    return '#64748b';
+    return '#10b981';
   }
 
   function formatResetText(resetTimeMs, lang, parseResetFn) {
@@ -631,9 +634,6 @@
         ? '0 10px 26px rgba(15, 23, 42, 0.14), 0 0 0 1px rgba(15, 23, 42, 0.04)'
         : '0 12px 30px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 255, 255, 0.04)';
 
-      const usagePct = Math.max(0, Number(data.usagePercent) || 0);
-      const contextUsed = Math.max(0, Number(data.contextUsed) || 0);
-      const contextLimit = Math.max(0, Number(data.contextLimit) || 0);
       const modelTitle = hub.resolveModelDisplayName(data.modelId, data.modelDisplayName);
 
       const summary = data.quotaSummary || null;
@@ -644,46 +644,21 @@
 
       const nodes = [];
 
-      // Row 1: Active Model + xx.x% (used/limit) + 4px #10b981 progress bar
-      const modelSection = doc.createElement('div');
-      modelSection.className = 'agy-quota-hud-model';
-      const modelTop = doc.createElement('div');
-      modelTop.style.cssText = 'display:flex;align-items:baseline;justify-content:space-between;gap:10px;';
-      const modelNameSpan = doc.createElement('span');
-      modelNameSpan.style.cssText = `font-size:10.5px;font-weight:700;color:${fgColor};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;`;
-      modelNameSpan.textContent = String(modelTitle || '');
-
-      const modelMetrics = doc.createElement('span');
-      modelMetrics.style.cssText = 'flex-shrink:0;white-space:nowrap;';
-      const modelPctSpan = doc.createElement('span');
-      modelPctSpan.style.cssText = 'color:#10b981;font-weight:600;';
-      modelPctSpan.textContent = `${usagePct.toFixed(1)}%`;
-      const modelRatioSpan = doc.createElement('span');
-      modelRatioSpan.style.cssText = 'color:#94a3b8;';
-      modelRatioSpan.textContent = ` (${formatTokenValue(contextUsed)}/${formatTokenValue(contextLimit)})`;
-      modelMetrics.appendChild(modelPctSpan);
-      modelMetrics.appendChild(modelRatioSpan);
-
-      modelTop.appendChild(modelNameSpan);
-      modelTop.appendChild(modelMetrics);
-
-      const ctxTrack = doc.createElement('div');
-      ctxTrack.style.cssText = `width:100%;height:4px;border-radius:999px;background:${trackColor};overflow:hidden;margin-top:4px;`;
-      const ctxFill = doc.createElement('div');
-      const ctxFillPct = usagePct <= 0 ? '0' : Math.min(100, Math.max(2, usagePct)).toFixed(1);
-      ctxFill.style.cssText = `width:${ctxFillPct}%;height:100%;border-radius:999px;background:#10b981;`;
-      ctxTrack.appendChild(ctxFill);
-
-      modelSection.appendChild(modelTop);
-      modelSection.appendChild(ctxTrack);
-      nodes.push(modelSection);
+      // Compact single-line model header (no context usage stats or context bar)
+      const headerEl = doc.createElement('div');
+      headerEl.className = 'agy-quota-hud-header';
+      headerEl.style.cssText = `font-size:10.5px;font-weight:700;color:${fgColor};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
+      headerEl.textContent = String(modelTitle || '');
+      nodes.push(headerEl);
 
       const appendQuotaRow = (clsName, label, bucket) => {
-        if (!bucket || typeof bucket.remainingFraction !== 'number') return;
-        const frac = Math.max(0, Math.min(1, Number(bucket.remainingFraction)));
+        const hasFrac = Boolean(bucket && typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction));
+        const frac = hasFrac ? Math.max(0, Math.min(1, Number(bucket.remainingFraction))) : 0;
         const pct = Math.round(frac * 100);
-        const resetText = formatResetText(bucket.resetTimeMs || bucket.resetTime, lang, parseResetTimeMs);
-        const barColor = getQuotaHudBarColor(frac);
+        const resetText = hasFrac
+          ? formatResetText(bucket.resetTimeMs || bucket.resetTime, lang, parseResetTimeMs)
+          : '';
+        const barColor = hasFrac ? getQuotaHudBarColor(frac) : trackColor;
 
         const rowWrap = doc.createElement('div');
         rowWrap.className = clsName;
@@ -698,8 +673,8 @@
         const right = doc.createElement('span');
         right.style.cssText = 'white-space:nowrap;';
         const pctEl = doc.createElement('span');
-        pctEl.style.cssText = `color:${fgColor};font-weight:600;`;
-        pctEl.textContent = `${pct}%`;
+        pctEl.style.cssText = `color:${hasFrac ? fgColor : mutedColor};font-weight:${hasFrac ? 600 : 400};`;
+        pctEl.textContent = hasFrac ? `${pct}%` : tCap('quotaUnavailable');
         right.appendChild(pctEl);
         if (resetText) {
           const resetEl = doc.createElement('span');
@@ -715,7 +690,7 @@
         track.style.cssText = `width:100%;height:3.5px;border-radius:999px;background:${trackColor};overflow:hidden;margin-top:3px;`;
         const fill = doc.createElement('div');
         fill.className = `${clsName}-bar`;
-        const barWidth = pct <= 0 ? '0' : Math.min(100, Math.max(2, pct)).toFixed(0);
+        const barWidth = (!hasFrac || pct <= 0) ? '0' : Math.min(100, Math.max(2, pct)).toFixed(0);
         fill.style.cssText = `width:${barWidth}%;height:100%;border-radius:999px;background:${barColor};`;
         fill.style.backgroundColor = barColor;
         track.appendChild(fill);
@@ -725,15 +700,11 @@
         nodes.push(rowWrap);
       };
 
-      // Row 2: 5-Hour Limit Remaining
-      if (fiveHour) {
-        appendQuotaRow('agy-quota-hud-5h', tCap('quota5h'), fiveHour);
-      }
+      // Row 1: 5-Hour Quota Remaining
+      appendQuotaRow('agy-quota-hud-5h', tCap('quota5h'), fiveHour);
 
-      // Row 3: Weekly Limit Remaining (when weekly bucket exists)
-      if (weekly) {
-        appendQuotaRow('agy-quota-hud-weekly', tCap('quotaWeekly'), weekly);
-      }
+      // Row 2: Weekly Quota Remaining (always rendered cleanly)
+      appendQuotaRow('agy-quota-hud-weekly', tCap('quotaWeekly'), weekly);
 
       replaceChildrenCompat(el, nodes);
       positionPopover(el, quotaBtn);

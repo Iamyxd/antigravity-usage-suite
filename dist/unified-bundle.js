@@ -1909,8 +1909,21 @@
       : (qi.resets_at !== undefined ? qi.resets_at
       : (qi.refreshTime !== undefined ? qi.refreshTime : qi.refresh_time))))));
     const resetTimeMs = parseResetTimeMs(rawReset);
-    const rawFrac = qi.remainingFraction !== undefined ? qi.remainingFraction : qi.remaining_fraction;
-    const rawPct = qi.remainingPercentage !== undefined ? qi.remainingPercentage : qi.remainingPercent;
+    let rawFrac = qi.remainingFraction !== undefined ? qi.remainingFraction : qi.remaining_fraction;
+    let rawPct = qi.remainingPercentage !== undefined ? qi.remainingPercentage : qi.remainingPercent;
+    if (rawFrac === undefined && rawPct === undefined && qi.remaining && typeof qi.remaining === 'object') {
+      const rem = qi.remaining;
+      const remCase = typeof rem.case === 'string' ? rem.case.toLowerCase() : '';
+      if (remCase.includes('percent') || remCase.includes('pct')) {
+        rawPct = rem.value;
+      } else if (rem.value !== undefined) {
+        rawFrac = rem.value;
+      } else if (rem.remainingFraction !== undefined || rem.remaining_fraction !== undefined) {
+        rawFrac = rem.remainingFraction !== undefined ? rem.remainingFraction : rem.remaining_fraction;
+      } else if (rem.remainingPercentage !== undefined || rem.remainingPercent !== undefined) {
+        rawPct = rem.remainingPercentage !== undefined ? rem.remainingPercentage : rem.remainingPercent;
+      }
+    }
     let remainingFraction;
     if (typeof rawFrac === 'number' && Number.isFinite(rawFrac)) {
       remainingFraction = Math.max(0, Math.min(1, rawFrac));
@@ -1935,6 +1948,7 @@
       obj.remaining_fraction !== undefined ||
       obj.remainingPercentage !== undefined ||
       obj.remainingPercent !== undefined ||
+      (obj.remaining && typeof obj.remaining === 'object' && obj.remaining.value !== undefined) ||
       obj.resetTime !== undefined ||
       obj.reset_time !== undefined ||
       obj.resetTimeMs !== undefined ||
@@ -1956,6 +1970,9 @@
   function classifyQuotaBucketType(bucket, keyHint = '') {
     const hintParts = [
       keyHint,
+      bucket && bucket.window,
+      bucket && bucket.bucketId,
+      bucket && bucket.displayName,
       bucket && bucket.bucketType,
       bucket && bucket.windowType,
       bucket && bucket.type,
@@ -1989,22 +2006,31 @@
 
     const activeGroupId = String(resp.activeGroupId || resp.activeGroup || resp.currentGroupId || '').trim().toLowerCase();
     const groupEntries = Array.isArray(rawGroups)
-      ? rawGroups.map((g, idx) => [String((g && (g.groupId || g.id || g.name)) || idx), g])
+      ? rawGroups.map((g, idx) => [String((g && (g.groupId || g.id || g.name || g.displayName)) || idx), g])
       : Object.entries(rawGroups);
 
     const groups = [];
     for (const [entryKey, g] of groupEntries) {
       if (!g || typeof g !== 'object') continue;
-      const id = String(g.groupId || g.id || g.name || entryKey || '').trim();
-      const name = String(g.name || g.groupName || id).trim();
+      const id = String(g.groupId || g.id || g.name || g.displayName || entryKey || '').trim();
+      const name = String(g.name || g.groupName || g.displayName || id).trim();
       const label = String(g.label || g.displayName || name || id).trim();
-      const pool = String(g.pool || g.quotaPool || id || name).trim().toLowerCase();
+      const pool = String(g.pool || g.quotaPool || g.displayName || id || name).trim().toLowerCase();
       const rawModels = Array.isArray(g.models) ? g.models
         : (Array.isArray(g.modelIds) ? g.modelIds
         : (Array.isArray(g.supportedModels) ? g.supportedModels : []));
       const models = rawModels
         .map(m => (typeof m === 'string' ? m : (m && (m.model || m.modelId || m.id || (m.modelOrAlias && m.modelOrAlias.model))) || ''))
         .filter(Boolean);
+      if (models.length === 0 && typeof g.description === 'string') {
+        const descMatch = g.description.match(/models within this group:\s*([^\n.]+)/i);
+        if (descMatch && descMatch[1]) {
+          for (const part of descMatch[1].split(',')) {
+            const trimmed = part.trim();
+            if (trimmed) models.push(trimmed);
+          }
+        }
+      }
 
       let fiveHour = null;
       let weekly = null;
@@ -2498,6 +2524,13 @@
               if (data.models || data.availableModels || (data.response && (data.response.models || data.response.availableModels))) {
                 if (applyAvailableModelsPayload(data)) notifySessionSubscribers();
               }
+              if (data.groups || (data.response && data.response.groups)) {
+                const sniffedQuotaSummary = parseQuotaSummaryResponse(data);
+                if (sniffedQuotaSummary) {
+                  quotaSummaryCache = { fetchedAt: Date.now(), parsed: sniffedQuotaSummary };
+                  notifySessionSubscribers();
+                }
+              }
               if (Array.isArray(data.generatorMetadata) && data.generatorMetadata.length > 0) {
                 const gmCid = normalizeCidKey(data.cascadeId || reqBodyCid);
                 let budgetUpdated = false;
@@ -2660,16 +2693,27 @@
         for (const node of startNodes) {
           let cur = findFiber(node);
           let depth = 0;
-          while (cur && depth < 90) {
+          while (cur && depth < 100) {
             depth++;
             if (visited.has(cur)) {
               cur = cur.return;
               continue;
             }
             visited.add(cur);
-            const props = cur.memoizedProps;
-            if (props && typeof props === 'object') {
-              const val = props.value;
+            const candidates = [];
+            if (cur.memoizedProps && typeof cur.memoizedProps === 'object') {
+              candidates.push(cur.memoizedProps.value);
+            }
+            let dep = cur.dependencies && cur.dependencies.firstContext;
+            let depDepth = 0;
+            while (dep && typeof dep === 'object' && depDepth < 24) {
+              depDepth++;
+              if (dep.memoizedValue && typeof dep.memoizedValue === 'object') {
+                candidates.push(dep.memoizedValue);
+              }
+              dep = dep.next;
+            }
+            for (const val of candidates) {
               if (val && typeof val === 'object' && typeof val.retrieveUserQuotaSummary === 'function') {
                 return { fn: val.retrieveUserQuotaSummary, ctxObj: val };
               }
@@ -2691,7 +2735,8 @@
         const modelMatch = groups.find(g => Array.isArray(g.models) && g.models.some(m => {
           const nm = normalizeModelCapKey(m);
           const cm = canonicalizeModelCapKey(m);
-          return (normId && (nm === normId || cm === canonId)) || (normLabel && nm === normLabel);
+          return (normId && (nm === normId || cm === canonId)) ||
+            (normLabel && (nm === normLabel || cm === canonicalizeModelCapKey(modelLabel) || (nm && normLabel.includes(nm))));
         }));
         if (modelMatch) return modelMatch;
       }
@@ -2725,17 +2770,21 @@
         let timerId = null;
         try {
           const found = findRetrieveUserQuotaSummary();
-          if (!found || typeof found.fn !== 'function') {
+          let res = null;
+          if (found && typeof found.fn === 'function') {
+            const rpcPromise = Promise.resolve()
+              .then(() => found.fn.call(found.ctxObj, {}))
+              .catch(() => null);
+            const timeoutPromise = new Promise((resolve) => {
+              timerId = setTimeout(() => resolve(null), QUOTA_SUMMARY_TIMEOUT_MS);
+              quotaSummaryTimers.add(timerId);
+            });
+            res = await Promise.race([rpcPromise, timeoutPromise]);
+          } else if (getCsrfToken()) {
+            res = await callLsRpc('RetrieveUserQuotaSummary', {}, QUOTA_SUMMARY_TIMEOUT_MS);
+          } else {
             return null;
           }
-          const rpcPromise = Promise.resolve()
-            .then(() => found.fn.call(found.ctxObj, {}))
-            .catch(() => null);
-          const timeoutPromise = new Promise((resolve) => {
-            timerId = setTimeout(() => resolve(null), QUOTA_SUMMARY_TIMEOUT_MS);
-            quotaSummaryTimers.add(timerId);
-          });
-          const res = await Promise.race([rpcPromise, timeoutPromise]);
           if (disposed) return null;
           const parsed = parseQuotaSummaryResponse(res);
           quotaSummaryCache = {
@@ -3880,6 +3929,7 @@
       warnHigh: '接近自动压缩阈值，建议适时归档上下文',
       quota5h: '5小时额度',
       quotaWeekly: '每周额度',
+      quotaUnavailable: '--',
       steps: '步数',
       switchHint: '点击切换: English',
       resetsSoon: '即将重置',
@@ -3903,6 +3953,7 @@
       warnHigh: '接近自動壓縮閾值，建議適時歸檔上下文',
       quota5h: '5小時額度',
       quotaWeekly: '每週額度',
+      quotaUnavailable: '--',
       steps: '步數',
       switchHint: '點擊切換: English',
       resetsSoon: '即將重置',
@@ -3926,6 +3977,7 @@
       warnHigh: 'Approaching auto-compaction threshold',
       quota5h: '5-Hour',
       quotaWeekly: 'Weekly',
+      quotaUnavailable: '--',
       steps: 'Steps',
       switchHint: 'Click to switch: 中文',
       resetsSoon: 'Resets soon',
@@ -3978,7 +4030,7 @@
     const pct = Math.max(0, Math.min(100, Math.round((Number(remainingFraction) || 0) * 100)));
     if (pct <= 10) return '#ef4444';
     if (pct <= 25) return '#f59e0b';
-    return '#64748b';
+    return '#10b981';
   }
 
   function formatResetText(resetTimeMs, lang, parseResetFn) {
@@ -4468,9 +4520,6 @@
         ? '0 10px 26px rgba(15, 23, 42, 0.14), 0 0 0 1px rgba(15, 23, 42, 0.04)'
         : '0 12px 30px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 255, 255, 0.04)';
 
-      const usagePct = Math.max(0, Number(data.usagePercent) || 0);
-      const contextUsed = Math.max(0, Number(data.contextUsed) || 0);
-      const contextLimit = Math.max(0, Number(data.contextLimit) || 0);
       const modelTitle = hub.resolveModelDisplayName(data.modelId, data.modelDisplayName);
 
       const summary = data.quotaSummary || null;
@@ -4481,46 +4530,21 @@
 
       const nodes = [];
 
-      // Row 1: Active Model + xx.x% (used/limit) + 4px #10b981 progress bar
-      const modelSection = doc.createElement('div');
-      modelSection.className = 'agy-quota-hud-model';
-      const modelTop = doc.createElement('div');
-      modelTop.style.cssText = 'display:flex;align-items:baseline;justify-content:space-between;gap:10px;';
-      const modelNameSpan = doc.createElement('span');
-      modelNameSpan.style.cssText = `font-size:10.5px;font-weight:700;color:${fgColor};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;`;
-      modelNameSpan.textContent = String(modelTitle || '');
-
-      const modelMetrics = doc.createElement('span');
-      modelMetrics.style.cssText = 'flex-shrink:0;white-space:nowrap;';
-      const modelPctSpan = doc.createElement('span');
-      modelPctSpan.style.cssText = 'color:#10b981;font-weight:600;';
-      modelPctSpan.textContent = `${usagePct.toFixed(1)}%`;
-      const modelRatioSpan = doc.createElement('span');
-      modelRatioSpan.style.cssText = 'color:#94a3b8;';
-      modelRatioSpan.textContent = ` (${formatTokenValue(contextUsed)}/${formatTokenValue(contextLimit)})`;
-      modelMetrics.appendChild(modelPctSpan);
-      modelMetrics.appendChild(modelRatioSpan);
-
-      modelTop.appendChild(modelNameSpan);
-      modelTop.appendChild(modelMetrics);
-
-      const ctxTrack = doc.createElement('div');
-      ctxTrack.style.cssText = `width:100%;height:4px;border-radius:999px;background:${trackColor};overflow:hidden;margin-top:4px;`;
-      const ctxFill = doc.createElement('div');
-      const ctxFillPct = usagePct <= 0 ? '0' : Math.min(100, Math.max(2, usagePct)).toFixed(1);
-      ctxFill.style.cssText = `width:${ctxFillPct}%;height:100%;border-radius:999px;background:#10b981;`;
-      ctxTrack.appendChild(ctxFill);
-
-      modelSection.appendChild(modelTop);
-      modelSection.appendChild(ctxTrack);
-      nodes.push(modelSection);
+      // Compact single-line model header (no context usage stats or context bar)
+      const headerEl = doc.createElement('div');
+      headerEl.className = 'agy-quota-hud-header';
+      headerEl.style.cssText = `font-size:10.5px;font-weight:700;color:${fgColor};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
+      headerEl.textContent = String(modelTitle || '');
+      nodes.push(headerEl);
 
       const appendQuotaRow = (clsName, label, bucket) => {
-        if (!bucket || typeof bucket.remainingFraction !== 'number') return;
-        const frac = Math.max(0, Math.min(1, Number(bucket.remainingFraction)));
+        const hasFrac = Boolean(bucket && typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction));
+        const frac = hasFrac ? Math.max(0, Math.min(1, Number(bucket.remainingFraction))) : 0;
         const pct = Math.round(frac * 100);
-        const resetText = formatResetText(bucket.resetTimeMs || bucket.resetTime, lang, parseResetTimeMs);
-        const barColor = getQuotaHudBarColor(frac);
+        const resetText = hasFrac
+          ? formatResetText(bucket.resetTimeMs || bucket.resetTime, lang, parseResetTimeMs)
+          : '';
+        const barColor = hasFrac ? getQuotaHudBarColor(frac) : trackColor;
 
         const rowWrap = doc.createElement('div');
         rowWrap.className = clsName;
@@ -4535,8 +4559,8 @@
         const right = doc.createElement('span');
         right.style.cssText = 'white-space:nowrap;';
         const pctEl = doc.createElement('span');
-        pctEl.style.cssText = `color:${fgColor};font-weight:600;`;
-        pctEl.textContent = `${pct}%`;
+        pctEl.style.cssText = `color:${hasFrac ? fgColor : mutedColor};font-weight:${hasFrac ? 600 : 400};`;
+        pctEl.textContent = hasFrac ? `${pct}%` : tCap('quotaUnavailable');
         right.appendChild(pctEl);
         if (resetText) {
           const resetEl = doc.createElement('span');
@@ -4552,7 +4576,7 @@
         track.style.cssText = `width:100%;height:3.5px;border-radius:999px;background:${trackColor};overflow:hidden;margin-top:3px;`;
         const fill = doc.createElement('div');
         fill.className = `${clsName}-bar`;
-        const barWidth = pct <= 0 ? '0' : Math.min(100, Math.max(2, pct)).toFixed(0);
+        const barWidth = (!hasFrac || pct <= 0) ? '0' : Math.min(100, Math.max(2, pct)).toFixed(0);
         fill.style.cssText = `width:${barWidth}%;height:100%;border-radius:999px;background:${barColor};`;
         fill.style.backgroundColor = barColor;
         track.appendChild(fill);
@@ -4562,15 +4586,11 @@
         nodes.push(rowWrap);
       };
 
-      // Row 2: 5-Hour Limit Remaining
-      if (fiveHour) {
-        appendQuotaRow('agy-quota-hud-5h', tCap('quota5h'), fiveHour);
-      }
+      // Row 1: 5-Hour Quota Remaining
+      appendQuotaRow('agy-quota-hud-5h', tCap('quota5h'), fiveHour);
 
-      // Row 3: Weekly Limit Remaining (when weekly bucket exists)
-      if (weekly) {
-        appendQuotaRow('agy-quota-hud-weekly', tCap('quotaWeekly'), weekly);
-      }
+      // Row 2: Weekly Quota Remaining (always rendered cleanly)
+      appendQuotaRow('agy-quota-hud-weekly', tCap('quotaWeekly'), weekly);
 
       replaceChildrenCompat(el, nodes);
       positionPopover(el, quotaBtn);
