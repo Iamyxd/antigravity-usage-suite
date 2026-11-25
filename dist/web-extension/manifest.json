@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Antigravity Usage Suite",
+  "version": "1.0.0",
+  "description": "Zero-patch CDP overlay for Antigravity: real-time context ring capsule, minimal 5h/weekly quota HUD, and token usage heatmap.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://127.0.0.1/*",
+        "http://127.0.0.1/*",
+        "https://localhost/*",
+        "https://antigravity.google/*"
+      ],
+      "js": [
+        "unified-bundle.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

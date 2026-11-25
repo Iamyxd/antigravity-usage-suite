@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+find_node_bin() {
+  if command -v node >/dev/null 2>&1; then
+    if node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
+      echo "node"
+      return 0
+    fi
+  fi
+
+  if [[ -n "${AG_APP_BIN:-}" && -x "${AG_APP_BIN}" ]]; then
+    echo "$AG_APP_BIN"
+    return 0
+  fi
+
+  local candidates=(
+    "/Applications/Antigravity.app/Contents/MacOS/Antigravity"
+    "$HOME/Applications/Antigravity.app/Contents/MacOS/Antigravity"
+  )
+  for c in "${candidates[@]}"; do
+    if [[ -x "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  done
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local running
+    while IFS= read -r running; do
+      if [[ -n "$running" && -x "$running" ]]; then
+        echo "$running"
+        return 0
+      fi
+    done < <(ps -ax -o comm= 2>/dev/null | grep '/Antigravity\.app/Contents/MacOS/Antigravity$' || true)
+
+    if command -v mdfind >/dev/null 2>&1; then
+      local app
+      while IFS= read -r app; do
+        if [[ -n "$app" && -x "$app/Contents/MacOS/Antigravity" ]]; then
+          echo "$app/Contents/MacOS/Antigravity"
+          return 0
+        fi
+      done < <(mdfind 'kMDItemFSName == "Antigravity.app"' 2>/dev/null || true)
+    fi
+  fi
+  return 1
+}
+
+RUNTIME_BIN="$(find_node_bin || true)"
+if [[ -z "$RUNTIME_BIN" ]]; then
+  echo "❌ Requires Node >= 22 or Antigravity executable (with ELECTRON_RUN_AS_NODE=1)." >&2
+  exit 1
+fi
+
+if [[ "$RUNTIME_BIN" == "node" ]]; then
+  exec node "$SCRIPT_DIR/cdp-manager.js" "$@"
+else
+  ELECTRON_RUN_AS_NODE=1 exec "$RUNTIME_BIN" "$SCRIPT_DIR/cdp-manager.js" "$@"
+fi
