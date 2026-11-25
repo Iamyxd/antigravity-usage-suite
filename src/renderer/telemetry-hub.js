@@ -565,7 +565,7 @@
         .map(m => (typeof m === 'string' ? m : (m && (m.model || m.modelId || m.id || (m.modelOrAlias && m.modelOrAlias.model))) || ''))
         .filter(Boolean);
       if (models.length === 0 && typeof g.description === 'string') {
-        const descMatch = g.description.match(/models within this group:\s*([^\n.]+)/i);
+        const descMatch = g.description.match(/models within this group:\s*([^\n]+?)(?:\.(?:\s|$)|$)/i);
         if (descMatch && descMatch[1]) {
           for (const part of descMatch[1].split(',')) {
             const trimmed = part.trim();
@@ -1160,7 +1160,9 @@
       }
       if (inFlightUserStatus) return inFlightUserStatus;
 
-      inFlightUserStatus = (async () => {
+      let settled = false;
+      let task = null;
+      task = (async () => {
         try {
           const usResp = await callLsRpc('GetUserStatus', {
             metadata: { ideName: 'antigravity', extensionName: 'antigravity' }
@@ -1170,10 +1172,12 @@
           }
           return userStatusCache.raw;
         } finally {
-          inFlightUserStatus = null;
+          settled = true;
+          if (task && inFlightUserStatus === task) inFlightUserStatus = null;
         }
       })();
-      return inFlightUserStatus;
+      if (!settled) inFlightUserStatus = task;
+      return task;
     }
 
     async function refreshAvailableModels(force = false) {
@@ -1183,7 +1187,9 @@
       }
       if (inFlightAvailableModels) return inFlightAvailableModels;
 
-      inFlightAvailableModels = (async () => {
+      let settled = false;
+      let task = null;
+      task = (async () => {
         try {
           let resp = await callLsRpc('GetAvailableModels', { forceRefresh: Boolean(force) });
           if (!resp) {
@@ -1194,10 +1200,12 @@
           if (resp) applyAvailableModelsPayload(resp);
           return modelCapabilitiesMap;
         } finally {
-          inFlightAvailableModels = null;
+          settled = true;
+          if (task && inFlightAvailableModels === task) inFlightAvailableModels = null;
         }
       })();
-      return inFlightAvailableModels;
+      if (!settled) inFlightAvailableModels = task;
+      return task;
     }
 
     function findRetrieveUserQuotaSummary() {
@@ -1303,12 +1311,14 @@
     async function refreshQuotaSummary(force = false) {
       if (disposed) return null;
       const now = Date.now();
-      if (!force && quotaSummaryCache.fetchedAt > 0 && (now - quotaSummaryCache.fetchedAt < QUOTA_SUMMARY_TTL_MS)) {
+      if (!force && quotaSummaryCache.fetchedAt > 0 && quotaSummaryCache.parsed && (now - quotaSummaryCache.fetchedAt < QUOTA_SUMMARY_TTL_MS)) {
         return quotaSummaryCache.parsed;
       }
       if (inFlightQuotaSummary) return inFlightQuotaSummary;
 
-      inFlightQuotaSummary = (async () => {
+      let settled = false;
+      let task = null;
+      task = (async () => {
         let timerId = null;
         try {
           const found = findRetrieveUserQuotaSummary();
@@ -1322,29 +1332,39 @@
               quotaSummaryTimers.add(timerId);
             });
             res = await Promise.race([rpcPromise, timeoutPromise]);
-          } else if (getCsrfToken()) {
+          }
+          if (!res && !disposed && getCsrfToken()) {
             res = await callLsRpc('RetrieveUserQuotaSummary', {}, QUOTA_SUMMARY_TIMEOUT_MS);
-          } else {
-            return null;
           }
           if (disposed) return null;
           const parsed = parseQuotaSummaryResponse(res);
-          quotaSummaryCache = {
-            fetchedAt: Date.now(),
-            parsed
-          };
+          if (parsed) {
+            quotaSummaryCache = {
+              fetchedAt: Date.now(),
+              parsed
+            };
+          } else if (force) {
+            quotaSummaryCache = {
+              fetchedAt: 0,
+              parsed: null
+            };
+          }
           return parsed;
         } catch {
           return null;
         } finally {
+          settled = true;
           if (timerId !== null) {
             clearTimeout(timerId);
             quotaSummaryTimers.delete(timerId);
           }
-          inFlightQuotaSummary = null;
+          if (task && inFlightQuotaSummary === task) {
+            inFlightQuotaSummary = null;
+          }
         }
       })();
-      return inFlightQuotaSummary;
+      if (!settled) inFlightQuotaSummary = task;
+      return task;
     }
 
     function analyzeSteps(steps, preferredModelId, preferredModelLabel, totalStepCount, cascadeId = '') {

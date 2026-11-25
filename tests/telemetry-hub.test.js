@@ -1572,4 +1572,161 @@ describe('TelemetryHub & Capsule UI', () => {
 
     hub.dispose();
   });
+
+  it('recovers from cold-start missing Fiber/CSRF without deadlocking inFlightQuotaSummary, falls back to RPC, and parses decimal model names', async () => {
+    const { doc, win, storage } = createMockDomEnv();
+    const cid = 'cascade-cold-start-01';
+    const footer = doc.createElement('div');
+    footer.className = 'agy-composer-footer';
+    footer.__reactFiber$cold = {
+      memoizedProps: { conversationId: cid, modelId: 'MODEL_PLACEHOLDER_M402', label: 'Claude Sonnet 5.5 (High)' },
+      return: null
+    };
+    doc.body.appendChild(footer);
+
+    let fiberMode = 'throw';
+    let rpcQuotaCalls = 0;
+    win.fetch = async (url) => {
+      if (String(url).endsWith('/RetrieveUserQuotaSummary')) {
+        rpcQuotaCalls += 1;
+        return makeJsonResponse({
+          response: {
+            groups: [
+              {
+                displayName: 'Gemini Models',
+                description: 'Models within this group: Gemini 4 Neon, Gemini 3.8 Flash',
+                buckets: [
+                  {
+                    bucketId: 'gemini-weekly',
+                    displayName: 'Weekly Limit Remaining',
+                    window: 'weekly',
+                    remaining: { case: 'remainingFraction', value: 0.78 },
+                    resetTime: { seconds: String(Math.floor(Date.now() / 1000) + 5 * 24 * 3600), nanos: 0 }
+                  },
+                  {
+                    bucketId: 'gemini-5h',
+                    displayName: 'Five Hour Limit Remaining',
+                    window: '5h',
+                    remaining: { case: 'remainingFraction', value: 0.25 },
+                    resetTime: { seconds: String(Math.floor(Date.now() / 1000) + 2 * 3600), nanos: 0 }
+                  }
+                ]
+              },
+              {
+                displayName: 'Claude and GPT models',
+                description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B',
+                buckets: [
+                  {
+                    bucketId: '3p-weekly',
+                    displayName: 'Weekly Limit Remaining',
+                    window: 'weekly',
+                    remaining: { case: 'remainingFraction', value: 0.91 },
+                    resetTime: { seconds: String(Math.floor(Date.now() / 1000) + 6 * 24 * 3600), nanos: 0 }
+                  },
+                  {
+                    bucketId: '3p-5h',
+                    displayName: 'Five Hour Limit Remaining',
+                    window: '5h',
+                    remaining: { case: 'remainingFraction', value: 0.84 },
+                    resetTime: { seconds: String(Math.floor(Date.now() / 1000) + 4 * 3600), nanos: 0 }
+                  }
+                ]
+              }
+            ]
+          }
+        });
+      }
+      return makeJsonResponse({ ok: true });
+    };
+
+    const hub = telemetryModule.createTelemetryHub({
+      window: win,
+      document: doc,
+      location: win.location,
+      storage,
+      core,
+      autoPoll: false
+    });
+    hub.start();
+
+    // 1. Cold start: no Fiber retrieveUserQuotaSummary and no csrfToken -> returns null WITHOUT deadlocking inFlightQuotaSummary
+    const coldRes = await hub.refreshQuotaSummary(false);
+    assert.equal(coldRes, null);
+
+    // 2. Attach Fiber client after cold start -> next non-forced refreshQuotaSummary(false) succeeds immediately
+    footer.__reactFiber$cold.dependencies = {
+      firstContext: {
+        memoizedValue: {
+          retrieveUserQuotaSummary: async () => {
+            if (fiberMode === 'throw') throw new Error('fiber temporary failure');
+            return {
+              response: {
+                groups: [
+                  {
+                    displayName: 'Gemini Models',
+                    description: 'Models within this group: Gemini 4 Neon, Gemini 3.8 Flash',
+                    buckets: [
+                      {
+                        bucketId: 'gemini-weekly',
+                        window: 'weekly',
+                        remaining: { case: 'remainingFraction', value: 0.66 },
+                        resetTime: { seconds: BigInt(Math.floor(Date.now() / 1000) + 5 * 24 * 3600), nanos: 0 }
+                      },
+                      {
+                        bucketId: 'gemini-5h',
+                        window: '5h',
+                        remaining: { case: 'remainingFraction', value: 0.33 },
+                        resetTime: { seconds: BigInt(Math.floor(Date.now() / 1000) + 2 * 3600), nanos: 0 }
+                      }
+                    ]
+                  },
+                  {
+                    displayName: 'Claude and GPT models',
+                    description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B',
+                    buckets: [
+                      {
+                        bucketId: '3p-weekly',
+                        window: 'weekly',
+                        remaining: { case: 'remainingFraction', value: 0.88 },
+                        resetTime: { seconds: BigInt(Math.floor(Date.now() / 1000) + 6 * 24 * 3600), nanos: 0 }
+                      },
+                      {
+                        bucketId: '3p-5h',
+                        window: '5h',
+                        remaining: { case: 'remainingFraction', value: 0.77 },
+                        resetTime: { seconds: BigInt(Math.floor(Date.now() / 1000) + 4 * 3600), nanos: 0 }
+                      }
+                    ]
+                  }
+                ]
+              }
+            };
+          }
+        },
+        next: null
+      }
+    };
+
+    fiberMode = 'ok';
+    const recovered = await hub.refreshQuotaSummary(false);
+    assert.ok(recovered, 'Non-forced refresh after cold start must recover once Fiber mounts');
+    assert.deepEqual(recovered.groups[0].models, ['Gemini 4 Neon', 'Gemini 3.8 Flash']);
+    assert.deepEqual(recovered.groups[1].models, ['Claude Opus 5.5', 'Claude Sonnet 5.5', 'GPT-OSS 120B']);
+    const resolvedRecovered = hub.resolveUsageForFooter(footer);
+    assert.equal(resolvedRecovered.quotaSummary.fiveHour.remainingFraction, 0.77);
+    assert.equal(resolvedRecovered.quotaSummary.weekly.remainingFraction, 0.88);
+    assert.equal(rpcQuotaCalls, 0);
+
+    // 3. When Fiber throws while csrfToken exists, falls back to RetrieveUserQuotaSummary RPC
+    await win.fetch('/local/seed', { headers: { 'x-codeium-csrf-token': 'csrf-cold-recovery' } });
+    fiberMode = 'throw';
+    const fallbackRes = await hub.refreshQuotaSummary(true);
+    assert.ok(fallbackRes);
+    assert.equal(rpcQuotaCalls, 1);
+    const resolvedFallback = hub.resolveUsageForFooter(footer);
+    assert.equal(resolvedFallback.quotaSummary.fiveHour.remainingFraction, 0.84);
+    assert.equal(resolvedFallback.quotaSummary.weekly.remainingFraction, 0.91);
+
+    hub.dispose();
+  });
 });
